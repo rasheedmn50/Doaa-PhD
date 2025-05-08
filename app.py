@@ -155,7 +155,7 @@ def fetch_bnf_info(medicine_name):
         for link in links:
             logging.info(f"Fetching BNF medicine page: {link}")
             driver.get(link)
-            WebDriverWait(driver, 15).until(
+            WebDriverWait(driver, 30).until(
                 EC.presence_of_element_located((By.TAG_NAME, "body"))
             )
             page_soup = BeautifulSoup(driver.page_source, "html.parser")
