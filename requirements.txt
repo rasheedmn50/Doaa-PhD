@@ -1,0 +1,13 @@
+streamlit
+requests
+beautifulsoup4
+openai
+sentence-transformers
+pandas
+numpy
+tweepy
+praw
+selenium
+gspread
+google-auth # often a dependency for gspread or for oauth2client
+# openpyxl # Not strictly needed anymore if not reading Excel, but pandas might still use it implicitly for some operations.

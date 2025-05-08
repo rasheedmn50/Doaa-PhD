@@ -1,0 +1,4 @@
+google-chrome-stable
+chromedriver
+# Optional: if you see font issues with headless Chrome
+# fonts-liberation
