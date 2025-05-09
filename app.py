@@ -164,7 +164,7 @@ def fetch_bnf_info(medicine_name):
                  content += drug_content_area.get_text(separator="\n", strip=True) + "\n\n"
             else:
                  content += page_soup.get_text(separator="\n", strip=True) + "\n\n"
-            time.sleep(0.5)
+            #time.sleep(0.5)
 
     except TimeoutException:
         logging.error("BNF scraping timed out for URL: %s or subsequent pages.", search_url)
