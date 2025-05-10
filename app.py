@@ -58,7 +58,7 @@ try:
 
     # Google Sheets init
     gcred = json.loads(GOOGLE_SHEETS_CREDENTIALS)
-    scopes = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+    scopes = ['https://spreadsheets.google.com/feeds','https://www.googleapis.com/auth/drive']
     creds = Credentials.from_service_account_info(gcred, scopes=scopes)
     gc = gspread.authorize(creds)
     feedback_sheet = gc.open(GOOGLE_SHEET_NAME).sheet1
@@ -84,7 +84,7 @@ except Exception as e:
     st.error(f"🔴 API client init error: {e}")
     st.stop()
 
-# ─── UK-ROUTED SESSION ─────────────────────────────────────────────
+# ─── UK-ROUTED REQUESTS SESSION ────────────────────────────────────
 def make_uk_session():
     s = requests.Session()
     if UK_PROXY:
@@ -98,51 +98,59 @@ def make_uk_session():
     })
     return s
 
-# ─── BNF SCRAPER (requests + card-snippet fallback) ───────────────
+# ─── BNF SCRAPER ──────────────────────────────────────────────────
 def fetch_bnf_info(med_name: str, max_links: int = 5):
+    """
+    1) Pull full topic pages if available.
+    2) Otherwise fallback to card-snippets from data-component="card".
+    """
     base = "https://bnf.nice.org.uk"
     search_url = f"{base}/search/?q={quote(med_name)}"
     sess = make_uk_session()
-    out = {"search_summary": "", "card_snippets": [], "links": [], "full_text": ""}
+
+    out = {
+        "search_summary": "",
+        "card_snippets": [],
+        "links": [],
+        "full_text": ""
+    }
 
     # 1) Search page
     try:
-        r = sess.get(search_url, timeout=10)
-        r.raise_for_status()
+        r = sess.get(search_url, timeout=10); r.raise_for_status()
     except Exception as e:
         logging.error(f"BNF search failed: {e}")
         return out
 
     soup = BeautifulSoup(r.text, "html.parser")
 
-    # 2) Extract first 20 lines of <main>
+    # Extract first 20 lines of <main>
     main = soup.find("main", id="maincontent") or soup.find("main")
     if main:
         lines = [ln.strip() for ln in main.get_text("\n").splitlines() if ln.strip()]
         out["search_summary"] = "\n".join(lines[:20])
 
-    # 3) Find top cards
-    cards = soup.select("header.card__header")[:max_links]
-    for hdr in cards:
-        a = hdr.find("a", href=True)
-        if not a: continue
-        href = a["href"]
-        title = a.get_text(strip=True)
+    # 2) Gather card headers & body snippets
+    cards = soup.select("div[data-component='card']")[:max_links]
+    for card in cards:
+        # heading link
+        hdr = card.find("a", href=True)
+        if not hdr:
+            continue
+        href = hdr["href"]
+        title = hdr.get_text(strip=True)
         url = href if href.startswith("http") else base + href
         out["links"].append({"title": title, "url": url})
 
-        # snippet fallback
-        body = hdr.find_next_sibling("div", class_="card__body")
-        if body:
-            snippet = body.get_text(strip=True)
-            out["card_snippets"].append(snippet)
+        # snippet
+        snippet = card.get_text(" ", strip=True)
+        out["card_snippets"].append(snippet)
 
-    # 4) Fetch detail pages
+    # 3) Fetch detail pages
     for link in out["links"]:
         try:
             time.sleep(0.5)
-            p = sess.get(link["url"], timeout=10)
-            p.raise_for_status()
+            p = sess.get(link["url"], timeout=10); p.raise_for_status()
             ps = BeautifulSoup(p.text, "html.parser")
             topic = ps.find(id="topic") or ps.find("main") or ps.body
             text = topic.get_text("\n", strip=True) if topic else ps.get_text("\n", strip=True)
@@ -152,11 +160,12 @@ def fetch_bnf_info(med_name: str, max_links: int = 5):
 
     return out
 
-# ─── NHS SCRAPER (original p[data-block-key]) ─────────────────────
+# ─── NHS SCRAPER ──────────────────────────────────────────────────
 def fetch_nhs_info(query: str, min_len: int = 1500, max_results: int = 5) -> str:
     base = "https://www.nhs.uk"
     search_url = f"{base}/search/results"
     sess = make_uk_session()
+
     try:
         resp = sess.get(search_url, params={"q": query, "page": 0}, timeout=10)
         resp.raise_for_status()
@@ -191,7 +200,7 @@ def fetch_nhs_info(query: str, min_len: int = 1500, max_results: int = 5) -> str
 
     return compiled
 
-# ─── GENERIC PAGE FETCH ───────────────────────────────────────────
+# ─── GENERIC URL FETCH ───────────────────────────────────────────
 def fetch_url_content(url: str) -> str:
     sess = make_uk_session()
     try:
@@ -203,7 +212,7 @@ def fetch_url_content(url: str) -> str:
         logging.error(f"URL fetch failed: {e}")
         return ""
 
-# ─── GPT-4o SUMMARY ────────────────────────────────────────────────
+# ─── GPT-4o SUMMARY ───────────────────────────────────────────────
 def generate_response(inp: str, ref: str) -> str:
     prompt = (
         "You are a medical assistant. Use *only* the reference below.\n\n"
@@ -315,21 +324,35 @@ if st.button("Analyze"):
             ref_text, src = "", ""
             if input_type == "Medicine":
                 bnf = fetch_bnf_info(user_input)
-                # prefer full_text, else fall back to snippets or search_summary
-                ref_text = bnf["full_text"].strip() or "\n\n".join(bnf["card_snippets"]) or bnf["search_summary"]
+                # prefer full_text > card_snippets > search_summary
+                ref_text = (
+                    bnf["full_text"].strip() or
+                    "\n\n".join(bnf["card_snippets"]) or
+                    bnf["search_summary"]
+                )
                 src = "BNF"
+
             elif input_type == "Medical Query":
                 ref_text = fetch_nhs_info(user_input)
                 src = "NHS"
-            else:  # Webpage with Medical Claims
-                page_content = fetch_url_content(user_input)
-                # use page <title> to query NHS
-                title = BeautifulSoup(requests.get(user_input, headers={"User-Agent":"Mozilla/5.0"}).text, "html.parser").title
-                query = title.get_text(strip=True) if title else user_input
-                ref_text = fetch_nhs_info(query)
-                src = "NHS"
 
-            st.session_state["ref"] = ref_text
+            else:  # Webpage with Medical Claims
+                page_text = fetch_url_content(user_input)
+                # derive NHS query from page <title>
+                try:
+                    html = make_uk_session().get(user_input,timeout=10).text
+                    soup = BeautifulSoup(html,"html.parser")
+                    title = soup.title.get_text(strip=True) if soup.title else ""
+                except:
+                    title = ""
+                if title:
+                    ref_text = fetch_nhs_info(title)
+                    src = "NHS"
+                else:
+                    ref_text = ""
+                    src = "NHS"
+
+            st.session_state["ref"]    = ref_text
             st.session_state["source"] = src
 
             if not ref_text.strip():
@@ -338,15 +361,17 @@ if st.button("Analyze"):
                 status_ui.update(label="Generating summary…", state="running")
                 summ = generate_response(user_input, ref_text)
                 st.session_state["summary"] = summ
-                st.session_state["done"] = True
+                st.session_state["done"]    = True
                 status_ui.update(label="Complete!", state="complete")
 
 if st.session_state["done"]:
     st.markdown(f"### 🤖 Summary (based on {st.session_state['source']})")
     st.write(st.session_state["summary"])
 
-    if input_type in ["Medical Query","Medicine"]:
-        sim = compute_similarity_score(st.session_state["summary"], st.session_state["ref"])
+    if input_type in ["Medicine","Medical Query"]:
+        sim = compute_similarity_score(
+            st.session_state["summary"],st.session_state["ref"]
+        )
         st.markdown(f"**Similarity Score:** {sim}/100")
 
     if input_type == "Webpage with Medical Claims":
@@ -371,7 +396,7 @@ if st.session_state["done"]:
                     "Summary": st.session_state["summary"],
                     "Feedback": fb
                 }
-                if input_type in ["Medical Query","Medicine"]:
+                if input_type in ["Medicine","Medical Query"]:
                     rec["Similarity Score"] = sim
                 save_feedback(rec)
             else:
