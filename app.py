@@ -68,63 +68,72 @@ def fetch_bnf_info(medicine_name):
     from selenium.webdriver.chrome.service import Service
 
     base_url = "https://bnf.nice.org.uk"
-    search_url = f"{base_url}/search/?q={requests.utils.quote(medicine_name)}" # Robust URL encoding
+    search_url = f"{base_url}/search/?q={requests.utils.quote(medicine_name)}"
     logging.info(f"Constructing BNF search URL: {search_url}")
 
     options = Options()
-    options.add_argument("--headless")
+    options.add_argument("--headless=new")  # More modern headless option
     options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1280,1024") 
+    options.add_argument("--window-size=1280,1024")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-extensions")
-    # options.add_argument("--remote-debugging-port=9222") # Often not needed and can cause issues
-    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.81 Safari/537.36")
-    options.add_argument('--blink-settings=imagesEnabled=false') # Attempt to disable images
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36") # Updated user-agent
+    options.add_argument('--blink-settings=imagesEnabled=false')
 
     driver = None
-    results = {"search_page_summary": "", "links": []} 
+    results = {"search_page_summary": "", "links": []}
 
     try:
-        service = Service() 
+        service = Service()
         driver = webdriver.Chrome(service=service, options=options)
-        driver.set_page_load_timeout(30) 
+        driver.set_page_load_timeout(25) # Slightly shorter timeout
 
         logging.info(f"Attempting to get BNF search page: {search_url}")
         driver.get(search_url)
-        
-        WebDriverWait(driver, 25).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "div.search-results-items, ol.results, ul.results, header.card__header, main#maincontent"))
-        )
-        logging.info("BNF search page loaded.")
-        
+
+        wait = WebDriverWait(driver, 20) # Shorter explicit wait
+        # More specific and potentially faster locators
+        main_element_locator = (By.CSS_SELECTOR, "main#maincontent")
+        search_results_locator = (By.CSS_SELECTOR, "ol.results > li, ul.results > li, div.search-results-items__result")
+        card_header_locator = (By.CSS_SELECTOR, 'header.card__header a[href]')
+
+        try:
+            wait.until(EC.presence_of_element_located(main_element_locator))
+            logging.info("BNF main content loaded.")
+        except TimeoutException:
+            logging.warning("BNF main content did not load in time, trying alternative locators.")
+            try:
+                wait.until(EC.presence_of_element_located(search_results_locator))
+                logging.info("BNF search results section loaded.")
+            except TimeoutException:
+                logging.error("BNF search results page did not load expected elements.")
+                raise TimeoutException("BNF search results page did not load expected elements.")
+
         soup = BeautifulSoup(driver.page_source, "html.parser")
-        
+
         main_content_area = soup.find("main", id="maincontent") or soup.find("main")
         if main_content_area:
             text_lines = [line.strip() for line in main_content_area.get_text(separator="\n").splitlines() if line.strip()]
             results["search_page_summary"] = "\n".join(text_lines[:30])
 
-        search_result_items = soup.select('header.card__header', limit=5) 
-        if not search_result_items:
-            search_result_items = soup.select('div.search-result-item', limit=5) # Fallback
+        search_result_links = soup.select('header.card__header a[href]', limit=5)
+        if not search_result_links:
+            search_result_links = soup.select('div.search-result-item a[href]', limit=5) # Fallback
 
-        for item_header in search_result_items:
-            link_tag = item_header.find("a", href=True)
-            if link_tag:
-                href = link_tag.get("href")
-                title = link_tag.get_text(strip=True)
-                if href and title: # Ensure both href and title are not empty
-                    full_url = href if href.startswith("http") else base_url + href
-                    # Basic validation to avoid mailto or javascript links
-                    if full_url.lower().startswith("http"):
-                         results["links"].append({"title": title, "url": full_url})
-        
+        for link_tag in search_result_links:
+            href = link_tag.get("href")
+            title = link_tag.get_text(strip=True)
+            if href and title:
+                full_url = href if href.startswith("http") else base_url + href
+                if full_url.lower().startswith("http"):
+                    results["links"].append({"title": title, "url": full_url})
+
         if not results["links"] and not results["search_page_summary"].strip():
             logging.warning("BNF: No links or summary extracted for '%s'.", medicine_name)
             st.warning(f"Could not extract specific links or a summary from BNF for '{medicine_name}'. The page structure might have changed or no results were found.")
         elif not results["links"]:
-             st.info(f"Extracted a general summary from BNF search results for '{medicine_name}', but no specific article links were found on the first page.")
+            st.info(f"Extracted a general summary from BNF search results for '{medicine_name}', but no specific article links were found on the first page.")
         else:
             logging.info(f"Extracted {len(results['links'])} links from BNF for '{medicine_name}'.")
 
@@ -144,9 +153,8 @@ def fetch_bnf_info(medicine_name):
                 logging.info("WebDriver closed for BNF.")
             except Exception as e_quit:
                 logging.error(f"Error quitting WebDriver for BNF: {e_quit}")
-    
-    return results
 
+    return results
 def fetch_nhs_info(query):
     logging.info(f"Fetching NHS info for query: {query}")
     base_url = "https://www.nhs.uk"
