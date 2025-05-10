@@ -47,18 +47,18 @@ def footer():
 
 # ─── LOAD SECRETS ─────────────────────────────────────────────────
 try:
-    OPENAI_API_KEY           = st.secrets["OPENAI_API_KEY"]
-    REDDIT_CLIENT_ID         = st.secrets["REDDIT_CLIENT_ID"]
-    REDDIT_CLIENT_SECRET     = st.secrets["REDDIT_CLIENT_SECRET"]
-    REDDIT_USER_AGENT        = st.secrets["REDDIT_USER_AGENT"]
-    TWITTER_BEARER_TOKEN     = st.secrets["TWITTER_BEARER_TOKEN"]
-    GOOGLE_SHEETS_CREDENTIALS= st.secrets["GOOGLE_SHEETS_CREDENTIALS"]
-    GOOGLE_SHEET_NAME        = st.secrets["GOOGLE_SHEET_NAME"]
-    UK_PROXY                 = st.secrets.get("UK_PROXY", None)
+    OPENAI_API_KEY            = st.secrets["OPENAI_API_KEY"]
+    REDDIT_CLIENT_ID          = st.secrets["REDDIT_CLIENT_ID"]
+    REDDIT_CLIENT_SECRET      = st.secrets["REDDIT_CLIENT_SECRET"]
+    REDDIT_USER_AGENT         = st.secrets["REDDIT_USER_AGENT"]
+    TWITTER_BEARER_TOKEN      = st.secrets["TWITTER_BEARER_TOKEN"]
+    GOOGLE_SHEETS_CREDENTIALS = st.secrets["GOOGLE_SHEETS_CREDENTIALS"]
+    GOOGLE_SHEET_NAME         = st.secrets["GOOGLE_SHEET_NAME"]
+    UK_PROXY                  = st.secrets.get("UK_PROXY", None)
 
-    # Parse Google service account JSON
+    # Google Sheets init
     gcred = json.loads(GOOGLE_SHEETS_CREDENTIALS)
-    scopes = ['https://spreadsheets.google.com/feeds','https://www.googleapis.com/auth/drive']
+    scopes = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
     creds = Credentials.from_service_account_info(gcred, scopes=scopes)
     gc = gspread.authorize(creds)
     feedback_sheet = gc.open(GOOGLE_SHEET_NAME).sheet1
@@ -72,9 +72,9 @@ except Exception as e:
 
 # ─── INIT CLIENTS ─────────────────────────────────────────────────
 try:
-    client = OpenAI(api_key=OPENAI_API_KEY)
-    model  = SentenceTransformer("all-MiniLM-L6-v2")
-    reddit = praw.Reddit(
+    client         = OpenAI(api_key=OPENAI_API_KEY)
+    model          = SentenceTransformer("all-MiniLM-L6-v2")
+    reddit         = praw.Reddit(
         client_id=REDDIT_CLIENT_ID,
         client_secret=REDDIT_CLIENT_SECRET,
         user_agent=REDDIT_USER_AGENT
@@ -84,162 +84,179 @@ except Exception as e:
     st.error(f"🔴 API client init error: {e}")
     st.stop()
 
-# ─── UK-ROUTED REQUESTS SESSION ────────────────────────────────────
+# ─── UK-ROUTED SESSION ─────────────────────────────────────────────
 def make_uk_session():
     s = requests.Session()
     if UK_PROXY:
-        s.proxies.update({"http":UK_PROXY,"https":UK_PROXY})
+        s.proxies.update({"http": UK_PROXY, "https": UK_PROXY})
     s.headers.update({
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
         ),
-        "Accept-Language":"en-GB,en;q=0.9"
+        "Accept-Language": "en-GB,en;q=0.9"
     })
     return s
 
-# ─── BNF FETCH (requests-based) ───────────────────────────────────
-def fetch_bnf_info(medicine_name:str, max_links:int=5):
-    base="https://bnf.nice.org.uk"
-    url=f"{base}/search/?q={quote(medicine_name)}"
-    sess=make_uk_session()
-    res={"search_summary":"","links":[],"full_text":""}
+# ─── BNF SCRAPER (requests + card-snippet fallback) ───────────────
+def fetch_bnf_info(med_name: str, max_links: int = 5):
+    base = "https://bnf.nice.org.uk"
+    search_url = f"{base}/search/?q={quote(med_name)}"
+    sess = make_uk_session()
+    out = {"search_summary": "", "card_snippets": [], "links": [], "full_text": ""}
 
-    # search page
+    # 1) Search page
     try:
-        r=sess.get(url,timeout=10); r.raise_for_status()
+        r = sess.get(search_url, timeout=10)
+        r.raise_for_status()
     except Exception as e:
-        logging.error(f"BNF search fail: {e}")
-        return res
+        logging.error(f"BNF search failed: {e}")
+        return out
 
-    soup=BeautifulSoup(r.text,"html.parser")
-    main=soup.find("main",id="maincontent") or soup.find("main")
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    # 2) Extract first 20 lines of <main>
+    main = soup.find("main", id="maincontent") or soup.find("main")
     if main:
-        lines=[ln.strip() for ln in main.get_text("\n").splitlines() if ln.strip()]
-        res["search_summary"]="\n".join(lines[:20])
+        lines = [ln.strip() for ln in main.get_text("\n").splitlines() if ln.strip()]
+        out["search_summary"] = "\n".join(lines[:20])
 
-    cards=soup.select("header.card__header a[href]")[:max_links]
-    for a in cards:
-        href=a["href"]; title=a.get_text(strip=True)
-        full = href if href.startswith("http") else base+href
-        res["links"].append({"title":title,"url":full})
+    # 3) Find top cards
+    cards = soup.select("header.card__header")[:max_links]
+    for hdr in cards:
+        a = hdr.find("a", href=True)
+        if not a: continue
+        href = a["href"]
+        title = a.get_text(strip=True)
+        url = href if href.startswith("http") else base + href
+        out["links"].append({"title": title, "url": url})
 
-    for L in res["links"]:
+        # snippet fallback
+        body = hdr.find_next_sibling("div", class_="card__body")
+        if body:
+            snippet = body.get_text(strip=True)
+            out["card_snippets"].append(snippet)
+
+    # 4) Fetch detail pages
+    for link in out["links"]:
         try:
             time.sleep(0.5)
-            p=sess.get(L["url"],timeout=10); p.raise_for_status()
-            ps=BeautifulSoup(p.text,"html.parser")
-            topic=ps.find(id="topic") or ps.find("main") or ps.body
-            text=topic.get_text("\n",strip=True) if topic else ps.get_text("\n",strip=True)
-            res["full_text"]+=f"## {L['title']}\n\n{text}\n\n"
+            p = sess.get(link["url"], timeout=10)
+            p.raise_for_status()
+            ps = BeautifulSoup(p.text, "html.parser")
+            topic = ps.find(id="topic") or ps.find("main") or ps.body
+            text = topic.get_text("\n", strip=True) if topic else ps.get_text("\n", strip=True)
+            out["full_text"] += f"## {link['title']}\n\n{text}\n\n"
         except Exception as e:
-            logging.warning(f"BNF detail fail {L['url']}: {e}")
+            logging.warning(f"BNF detail fetch failed {link['url']}: {e}")
 
-    return res
+    return out
 
-# ─── NHS FETCH (original p[data-block-key] logic) ─────────────────
-def fetch_nhs_info(query:str, min_len:int=1500, max_results:int=5):
-    base="https://www.nhs.uk"
-    url=f"{base}/search/results"
-    sess=make_uk_session()
+# ─── NHS SCRAPER (original p[data-block-key]) ─────────────────────
+def fetch_nhs_info(query: str, min_len: int = 1500, max_results: int = 5) -> str:
+    base = "https://www.nhs.uk"
+    search_url = f"{base}/search/results"
+    sess = make_uk_session()
     try:
-        r=sess.get(url,params={"q":query,"page":0},timeout=10); r.raise_for_status()
+        resp = sess.get(search_url, params={"q": query, "page": 0}, timeout=10)
+        resp.raise_for_status()
     except Exception as e:
-        logging.error(f"NHS search fail: {e}")
+        logging.error(f"NHS search failed: {e}")
         return ""
-    soup=BeautifulSoup(r.text,"html.parser")
-    ul=soup.find("ul",class_="nhsuk-list")
-    links=[]
-    if ul:
-        for a in ul.find_all("a",href=True)[:max_results]:
-            href=a["href"]
-            full=href if href.startswith("http") else base+href
-            links.append(full)
-    else:
-        panel=soup.select("a.nhsuk-list-panel__link")[:max_results]
-        for a in panel:
-            href=a["href"]
-            full=href if href.startswith("http") else base+href
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    results_ul = soup.find("ul", class_="nhsuk-list")
+    links = []
+    if results_ul:
+        for a in results_ul.find_all("a", href=True)[:max_results]:
+            href = a["href"]
+            full = href if href.startswith("http") else base + href
             links.append(full)
 
-    compiled=""
-    for link in links:
+    compiled = ""
+    for url in links:
         try:
             time.sleep(0.5)
-            p=sess.get(link,timeout=10); p.raise_for_status()
-            ps=BeautifulSoup(p.text,"html.parser")
-            h2=ps.find("h2")
-            title=h2.get_text(strip=True) if h2 else ""
-            paras=ps.find_all("p",attrs={"data-block-key":True})
-            txt="\n".join(p.get_text(strip=True) for p in paras)
-            compiled+=f"{title}\n{txt}\n\n"
-            if len(compiled)>=min_len: break
+            pr = sess.get(url, timeout=10); pr.raise_for_status()
+            ps = BeautifulSoup(pr.text, "html.parser")
+            h2 = ps.find("h2")
+            title = h2.get_text(strip=True) if h2 else ""
+            paras = ps.find_all("p", attrs={"data-block-key": True})
+            txt = "\n".join(p.get_text(strip=True) for p in paras)
+            compiled += f"{title}\n{txt}\n\n"
+            if len(compiled) >= min_len:
+                break
         except Exception as e:
-            logging.warning(f"NHS detail fail {link}: {e}")
+            logging.warning(f"NHS detail fetch failed {url}: {e}")
 
     return compiled
 
-# ─── GENERIC URL FETCH ───────────────────────────────────────────
-def fetch_url_content(url:str):
-    sess=make_uk_session()
+# ─── GENERIC PAGE FETCH ───────────────────────────────────────────
+def fetch_url_content(url: str) -> str:
+    sess = make_uk_session()
     try:
-        r=sess.get(url,timeout=15); r.raise_for_status()
-        soup=BeautifulSoup(r.text,"html.parser")
-        main=soup.find("article") or soup.find("main") or soup.body
-        return main.get_text("\n",strip=True) if main else ""
+        r = sess.get(url, timeout=15); r.raise_for_status()
+        soup = BeautifulSoup(r.text, "html.parser")
+        main = soup.find("article") or soup.find("main") or soup.body
+        return main.get_text("\n", strip=True) if main else ""
     except Exception as e:
-        logging.error(f"URL fetch fail: {e}")
+        logging.error(f"URL fetch failed: {e}")
         return ""
 
-# ─── GPT RESPONSE ────────────────────────────────────────────────
-def generate_response(inp:str, ref:str)->str:
-    prompt=(
+# ─── GPT-4o SUMMARY ────────────────────────────────────────────────
+def generate_response(inp: str, ref: str) -> str:
+    prompt = (
         "You are a medical assistant. Use *only* the reference below.\n\n"
         f"User query: {inp}\n\nReference:\n{ref[:12000]}"
     )
-    msgs=[{"role":"system","content":"Answer strictly from the reference."},
-          {"role":"user","content":prompt}]
+    msgs = [
+        {"role": "system", "content": "Answer strictly from the reference."},
+        {"role": "user",   "content": prompt}
+    ]
     try:
-        r=client.chat.completions.create(
-            model="gpt-4o",messages=msgs,temperature=0.3,max_tokens=1000
+        r = client.chat.completions.create(
+            model="gpt-4o", messages=msgs, temperature=0.3, max_tokens=1000
         )
         return r.choices[0].message.content
     except Exception as e:
-        logging.error(f"GPT fail: {e}")
+        logging.error(f"GPT error: {e}")
         return f"❌ GPT error: {e}"
 
-# ─── SIMILARITY ──────────────────────────────────────────────────
-def compute_similarity_score(a:str,b:str)->float:
-    if not a or not b: return 0.0
+# ─── SIMILARITY SCORE ─────────────────────────────────────────────
+def compute_similarity_score(a: str, b: str) -> float:
+    if not a or not b:
+        return 0.0
     try:
-        ea=model.encode(a,convert_to_tensor=True)
-        eb=model.encode(b,convert_to_tensor=True)
-        sim=util.cos_sim(ea,eb).item()
-        return round(sim*100,2)
-    except:
+        ea = model.encode(a, convert_to_tensor=True)
+        eb = model.encode(b, convert_to_tensor=True)
+        sim = util.cos_sim(ea, eb).item()
+        return round(sim * 100, 2)
+    except Exception:
         return 0.0
 
-# ─── FACT-CHECK POSTS ────────────────────────────────────────────
-def fact_check_post(post:str, ref:str)->str:
-    prompt=(
+# ─── FACT-CHECK POSTS ──────────────────────────────────────────────
+def fact_check_post(post: str, ref: str) -> str:
+    prompt = (
         "Fact-check this post against the reference below.\n"
         "✅ supported, ❌ contradicted, ⚠️ unverifiable.\n\n"
         f"POST:\n\"\"\"{post}\"\"\"\n\nREFERENCE:\n\"\"\"{ref[:8000]}\"\"\"\n\nBegin."
     )
-    msgs=[{"role":"system","content":"Fact-check medical claims."},
-          {"role":"user","content":prompt}]
+    msgs = [
+        {"role": "system", "content": "Fact-check medical claims."},
+        {"role": "user",   "content": prompt}
+    ]
     try:
-        r=client.chat.completions.create(
-            model="gpt-4o",messages=msgs,temperature=0.2,max_tokens=800
+        r = client.chat.completions.create(
+            model="gpt-4o", messages=msgs, temperature=0.2, max_tokens=800
         )
         return r.choices[0].message.content
     except Exception as e:
-        logging.error(f"Fact-check fail: {e}")
+        logging.error(f"Fact-check error: {e}")
         return f"❌ Fact-check error: {e}"
 
 # ─── SAVE FEEDBACK ────────────────────────────────────────────────
-def save_feedback(rec:dict):
-    row=[
+def save_feedback(rec: dict):
+    row = [
         rec.get("Timestamp",""),
         rec.get("Input",""),
         rec.get("Type",""),
@@ -252,16 +269,18 @@ def save_feedback(rec:dict):
         feedback_sheet.append_row(row)
         st.success("✅ Feedback saved.")
     except Exception as e:
-        logging.error(f"Save fb fail: {e}")
+        logging.error(f"Save feedback failed: {e}")
         st.error(f"Could not save feedback: {e}")
 
 # ─── STREAMLIT UI ────────────────────────────────────────────────
 
 st.sidebar.image(
-    "https://www.bcu.ac.uk/images/default-source/marketing/logos/bcu-logo.svg",width=150
+    "https://www.bcu.ac.uk/images/default-source/marketing/logos/bcu-logo.svg", width=150
 )
 st.sidebar.title("🧠 Medicine Info Validator")
-st.sidebar.warning("Disclaimer: For general understanding only; not medical advice.")
+st.sidebar.warning(
+    "Disclaimer: For general understanding only; not medical advice."
+)
 st.sidebar.caption("Developed by Doaa Al-Turkey")
 st.sidebar.markdown("---")
 
@@ -272,17 +291,19 @@ input_type = st.radio(
     horizontal=True
 )
 
-placeholder = {
-    "Medicine":"e.g. Paracetamol",
-    "Medical Query":"e.g. symptoms of flu",
-    "Webpage with Medical Claims":"e.g. https://example.com/article"
-}[input_type]
-
-user_input = st.text_input(f"Enter {input_type}:", placeholder)
+placeholders = {
+    "Medicine": "e.g. Paracetamol",
+    "Medical Query": "e.g. symptoms of flu",
+    "Webpage with Medical Claims": "e.g. https://example.com/article"
+}
+user_input = st.text_input(f"Enter {input_type}:", placeholders[input_type])
 
 if 'done' not in st.session_state:
     st.session_state.update({
-        "done":False,"ref":"","summary":"","source":""
+        "done": False,
+        "ref": "",
+        "summary": "",
+        "source": ""
     })
 
 if st.button("Analyze"):
@@ -290,102 +311,104 @@ if st.button("Analyze"):
     if not user_input.strip():
         st.warning("Please enter valid input.")
     else:
-        with st.status(f"Fetching {input_type} …", expanded=True) as status_ui:
-            ref,src="",""
-            if input_type=="Medicine":
-                bnf=fetch_bnf_info(user_input)
-                # use full_text if available, else search_summary
-                ref=bnf["full_text"] or bnf["search_summary"]
-                src="BNF"
-            elif input_type=="Medical Query":
-                ref=fetch_nhs_info(user_input)
-                src="NHS"
-            else:
-                if not user_input.startswith("http"):
-                    st.error("URL must start with http:// or https://")
-                else:
-                    ref=fetch_url_content(user_input)
-                    src="Webpage"
+        with st.status(f"Fetching {input_type}…", expanded=True) as status_ui:
+            ref_text, src = "", ""
+            if input_type == "Medicine":
+                bnf = fetch_bnf_info(user_input)
+                # prefer full_text, else fall back to snippets or search_summary
+                ref_text = bnf["full_text"].strip() or "\n\n".join(bnf["card_snippets"]) or bnf["search_summary"]
+                src = "BNF"
+            elif input_type == "Medical Query":
+                ref_text = fetch_nhs_info(user_input)
+                src = "NHS"
+            else:  # Webpage with Medical Claims
+                page_content = fetch_url_content(user_input)
+                # use page <title> to query NHS
+                title = BeautifulSoup(requests.get(user_input, headers={"User-Agent":"Mozilla/5.0"}).text, "html.parser").title
+                query = title.get_text(strip=True) if title else user_input
+                ref_text = fetch_nhs_info(query)
+                src = "NHS"
 
-            st.session_state["ref"]=ref
-            st.session_state["source"]=src
+            st.session_state["ref"] = ref_text
+            st.session_state["source"] = src
 
-            if not ref.strip():
-                status_ui.update(label=f"No data from {src}.",state="error")
+            if not ref_text.strip():
+                status_ui.update(label=f"No reference data from {src}.", state="error")
             else:
-                status_ui.update(label="Generating summary …",state="running")
-                summ=generate_response(user_input,ref)
-                st.session_state["summary"]=summ
-                st.session_state["done"]=True
-                status_ui.update(label="Complete!",state="complete")
+                status_ui.update(label="Generating summary…", state="running")
+                summ = generate_response(user_input, ref_text)
+                st.session_state["summary"] = summ
+                st.session_state["done"] = True
+                status_ui.update(label="Complete!", state="complete")
 
 if st.session_state["done"]:
-    st.markdown(f"### 🤖 Summary (source: {st.session_state['source']})")
+    st.markdown(f"### 🤖 Summary (based on {st.session_state['source']})")
     st.write(st.session_state["summary"])
 
-    if st.session_state["source"] in ["NHS","Webpage"]:
-        sim=compute_similarity_score(st.session_state["summary"],st.session_state["ref"])
+    if input_type in ["Medical Query","Medicine"]:
+        sim = compute_similarity_score(st.session_state["summary"], st.session_state["ref"])
         st.markdown(f"**Similarity Score:** {sim}/100")
 
-    if input_type=="Webpage":
-        st.markdown("### 🧾 Webpage Claim Verification")
-        with st.spinner("Fact-checking…"):
-            chk=fact_check_post(st.session_state["ref"],st.session_state["ref"])
-        st.write(chk)
+    if input_type == "Webpage with Medical Claims":
+        st.markdown("### 🔎 Webpage Medical-Claim Verification")
+        with st.spinner("Fact-checking claims…"):
+            result = fact_check_post(
+                fetch_url_content(user_input),
+                st.session_state["ref"]
+            )
+        st.write(result)
 
     st.markdown("---")
     with st.expander("📝 Doctor Feedback (optional)"):
-        fb=st.text_area("Your feedback:")
+        fb = st.text_area("Your feedback:")
         if st.button("Submit Feedback"):
             if fb.strip():
-                rec={
-                    "Timestamp":pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "Input":user_input,
-                    "Type":input_type,
-                    "Source":st.session_state["source"],
-                    "Summary":st.session_state["summary"],
-                    "Feedback":fb
+                rec = {
+                    "Timestamp": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "Input": user_input,
+                    "Type": input_type,
+                    "Source": st.session_state["source"],
+                    "Summary": st.session_state["summary"],
+                    "Feedback": fb
                 }
-                if st.session_state["source"] in ["NHS","Webpage"]:
-                    rec["Similarity Score"]=compute_similarity_score(
-                        st.session_state["summary"],st.session_state["ref"]
-                    )
+                if input_type in ["Medical Query","Medicine"]:
+                    rec["Similarity Score"] = sim
                 save_feedback(rec)
             else:
                 st.warning("Enter feedback before submitting.")
 
-    if st.session_state["source"] in ["BNF","NHS"]:
+    if input_type in ["Medicine","Medical Query"]:
         st.markdown("## 🔍 Fact-Check Social Media")
-        tabs=st.tabs(["🐦 Twitter","💬 Reddit"])
+        tabs = st.tabs(["🐦 Twitter","💬 Reddit"])
 
         with tabs[0]:
             st.markdown(f"**Tweets for '{user_input}'**")
             try:
-                tw=twitter_client.search_recent_tweets(
+                tw = twitter_client.search_recent_tweets(
                     query=f"{user_input} -is:retweet lang:en",
-                    max_results=5,tweet_fields=["text"]
+                    max_results=5, tweet_fields=["text"]
                 )
                 for i,t in enumerate(tw.data or []):
-                    txt=t.text
+                    txt = t.text
                     st.markdown(f"**Tweet {i+1}:**"); st.info(txt)
                     with st.spinner("Fact-checking…"):
-                        res=fact_check_post(txt,st.session_state["ref"])
-                        sc=compute_similarity_score(txt,st.session_state["ref"])
-                    st.write(res); st.markdown(f"**Similarity:** {sc}/100")
+                        fc = fact_check_post(txt, st.session_state["ref"])
+                        sc = compute_similarity_score(txt, st.session_state["ref"])
+                    st.write(fc); st.markdown(f"**Similarity:** {sc}/100")
             except Exception as e:
                 st.warning(f"Twitter error: {e}")
 
         with tabs[1]:
             st.markdown(f"**Reddit for '{user_input}'**")
             try:
-                posts=reddit.subreddit("medicine").search(user_input,limit=5,sort="new")
+                posts = reddit.subreddit("medicine").search(user_input, limit=5, sort="new")
                 for i,p in enumerate(posts):
-                    txt=p.title+"\n\n"+p.selftext
+                    txt = p.title + "\n\n" + p.selftext
                     st.markdown(f"**Post {i+1}:** {p.title}")
                     with st.spinner("Fact-checking…"):
-                        res=fact_check_post(txt,st.session_state["ref"])
-                        sc=compute_similarity_score(txt,st.session_state["ref"])
-                    st.write(res); st.markdown(f"**Similarity:** {sc}/100")
+                        fc = fact_check_post(txt, st.session_state["ref"])
+                        sc = compute_similarity_score(txt, st.session_state["ref"])
+                    st.write(fc); st.markdown(f"**Similarity:** {sc}/100")
             except Exception as e:
                 st.warning(f"Reddit error: {e}")
 
