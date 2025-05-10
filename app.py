@@ -56,7 +56,6 @@ try:
     GOOGLE_SHEET_NAME         = st.secrets["GOOGLE_SHEET_NAME"]
     UK_PROXY                  = st.secrets.get("UK_PROXY", None)
 
-    # Google Sheets init
     gcred = json.loads(GOOGLE_SHEETS_CREDENTIALS)
     scopes = ['https://spreadsheets.google.com/feeds','https://www.googleapis.com/auth/drive']
     creds = Credentials.from_service_account_info(gcred, scopes=scopes)
@@ -100,22 +99,11 @@ def make_uk_session():
 
 # ─── BNF SCRAPER ──────────────────────────────────────────────────
 def fetch_bnf_info(med_name: str, max_links: int = 5):
-    """
-    1) Pull full topic pages if available.
-    2) Otherwise fallback to card-snippets from data-component="card".
-    """
     base = "https://bnf.nice.org.uk"
     search_url = f"{base}/search/?q={quote(med_name)}"
     sess = make_uk_session()
+    out = {"card_snippets": [], "links": [], "full_text": ""}
 
-    out = {
-        "search_summary": "",
-        "card_snippets": [],
-        "links": [],
-        "full_text": ""
-    }
-
-    # 1) Search page
     try:
         r = sess.get(search_url, timeout=10); r.raise_for_status()
     except Exception as e:
@@ -124,29 +112,19 @@ def fetch_bnf_info(med_name: str, max_links: int = 5):
 
     soup = BeautifulSoup(r.text, "html.parser")
 
-    # Extract first 20 lines of <main>
-    main = soup.find("main", id="maincontent") or soup.find("main")
-    if main:
-        lines = [ln.strip() for ln in main.get_text("\n").splitlines() if ln.strip()]
-        out["search_summary"] = "\n".join(lines[:20])
-
-    # 2) Gather card headers & body snippets
+    # pull card elements
     cards = soup.select("div[data-component='card']")[:max_links]
     for card in cards:
-        # heading link
-        hdr = card.find("a", href=True)
-        if not hdr:
-            continue
-        href = hdr["href"]
-        title = hdr.get_text(strip=True)
+        a = card.find("a", href=True)
+        if not a: continue
+        href = a["href"]
+        title = a.get_text(strip=True)
         url = href if href.startswith("http") else base + href
         out["links"].append({"title": title, "url": url})
-
-        # snippet
         snippet = card.get_text(" ", strip=True)
         out["card_snippets"].append(snippet)
 
-    # 3) Fetch detail pages
+    # if we found detail pages, fetch them
     for link in out["links"]:
         try:
             time.sleep(0.5)
@@ -165,6 +143,7 @@ def fetch_nhs_info(query: str, min_len: int = 1500, max_results: int = 5) -> str
     base = "https://www.nhs.uk"
     search_url = f"{base}/search/results"
     sess = make_uk_session()
+    compiled = ""
 
     try:
         resp = sess.get(search_url, params={"q": query, "page": 0}, timeout=10)
@@ -182,14 +161,12 @@ def fetch_nhs_info(query: str, min_len: int = 1500, max_results: int = 5) -> str
             full = href if href.startswith("http") else base + href
             links.append(full)
 
-    compiled = ""
     for url in links:
         try:
             time.sleep(0.5)
             pr = sess.get(url, timeout=10); pr.raise_for_status()
             ps = BeautifulSoup(pr.text, "html.parser")
-            h2 = ps.find("h2")
-            title = h2.get_text(strip=True) if h2 else ""
+            h2 = ps.find("h2"); title = h2.get_text(strip=True) if h2 else ""
             paras = ps.find_all("p", attrs={"data-block-key": True})
             txt = "\n".join(p.get_text(strip=True) for p in paras)
             compiled += f"{title}\n{txt}\n\n"
@@ -200,7 +177,7 @@ def fetch_nhs_info(query: str, min_len: int = 1500, max_results: int = 5) -> str
 
     return compiled
 
-# ─── GENERIC URL FETCH ───────────────────────────────────────────
+# ─── URL FETCH ────────────────────────────────────────────────────
 def fetch_url_content(url: str) -> str:
     sess = make_uk_session()
     try:
@@ -322,14 +299,18 @@ if st.button("Analyze"):
     else:
         with st.status(f"Fetching {input_type}…", expanded=True) as status_ui:
             ref_text, src = "", ""
+
             if input_type == "Medicine":
                 bnf = fetch_bnf_info(user_input)
-                # prefer full_text > card_snippets > search_summary
-                ref_text = (
-                    bnf["full_text"].strip() or
-                    "\n\n".join(bnf["card_snippets"]) or
-                    bnf["search_summary"]
-                )
+                # only accept detail or snippet—no generic subscription text
+                if bnf["full_text"].strip():
+                    ref_text = bnf["full_text"]
+                elif bnf["card_snippets"]:
+                    ref_text = "\n\n".join(bnf["card_snippets"])
+                else:
+                    st.error(f"❌ No medicine information found for “{user_input}” on BNF.")
+                    status_ui.update(label="No BNF content.", state="error")
+                    continue
                 src = "BNF"
 
             elif input_type == "Medical Query":
@@ -338,31 +319,25 @@ if st.button("Analyze"):
 
             else:  # Webpage with Medical Claims
                 page_text = fetch_url_content(user_input)
-                # derive NHS query from page <title>
+                # derive NHS query from page title if possible
+                title = ""
                 try:
-                    html = make_uk_session().get(user_input,timeout=10).text
+                    html = requests.get(user_input, timeout=10).text
                     soup = BeautifulSoup(html,"html.parser")
                     title = soup.title.get_text(strip=True) if soup.title else ""
                 except:
-                    title = ""
-                if title:
-                    ref_text = fetch_nhs_info(title)
-                    src = "NHS"
-                else:
-                    ref_text = ""
-                    src = "NHS"
+                    pass
+                ref_text = fetch_nhs_info(title or user_input)
+                src = "NHS"
 
             st.session_state["ref"]    = ref_text
             st.session_state["source"] = src
 
-            if not ref_text.strip():
-                status_ui.update(label=f"No reference data from {src}.", state="error")
-            else:
-                status_ui.update(label="Generating summary…", state="running")
-                summ = generate_response(user_input, ref_text)
-                st.session_state["summary"] = summ
-                st.session_state["done"]    = True
-                status_ui.update(label="Complete!", state="complete")
+            status_ui.update(label="Generating summary…", state="running")
+            summ = generate_response(user_input, ref_text)
+            st.session_state["summary"] = summ
+            st.session_state["done"]    = True
+            status_ui.update(label="Complete!", state="complete")
 
 if st.session_state["done"]:
     st.markdown(f"### 🤖 Summary (based on {st.session_state['source']})")
