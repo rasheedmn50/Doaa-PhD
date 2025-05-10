@@ -310,7 +310,7 @@ if st.button("Analyze"):
                 else:
                     st.error(f"❌ No medicine information found for “{user_input}” on BNF.")
                     status_ui.update(label="No BNF content.", state="error")
-                    continue
+              continue
                 src = "BNF"
 
             elif input_type == "Medical Query":
