@@ -105,7 +105,8 @@ def fetch_bnf_info(med_name: str, max_links: int = 5):
     out = {"card_snippets": [], "links": [], "full_text": ""}
 
     try:
-        r = sess.get(search_url, timeout=10); r.raise_for_status()
+        r = sess.get(search_url, timeout=10)
+        r.raise_for_status()
     except Exception as e:
         logging.error(f"BNF search failed: {e}")
         return out
@@ -116,7 +117,8 @@ def fetch_bnf_info(med_name: str, max_links: int = 5):
     cards = soup.select("div[data-component='card']")[:max_links]
     for card in cards:
         a = card.find("a", href=True)
-        if not a: continue
+        if not a:
+            continue
         href = a["href"]
         title = a.get_text(strip=True)
         url = href if href.startswith("http") else base + href
@@ -124,11 +126,12 @@ def fetch_bnf_info(med_name: str, max_links: int = 5):
         snippet = card.get_text(" ", strip=True)
         out["card_snippets"].append(snippet)
 
-    # if we found detail pages, fetch them
+    # fetch detail pages
     for link in out["links"]:
         try:
             time.sleep(0.5)
-            p = sess.get(link["url"], timeout=10); p.raise_for_status()
+            p = sess.get(link["url"], timeout=10)
+            p.raise_for_status()
             ps = BeautifulSoup(p.text, "html.parser")
             topic = ps.find(id="topic") or ps.find("main") or ps.body
             text = topic.get_text("\n", strip=True) if topic else ps.get_text("\n", strip=True)
@@ -164,9 +167,11 @@ def fetch_nhs_info(query: str, min_len: int = 1500, max_results: int = 5) -> str
     for url in links:
         try:
             time.sleep(0.5)
-            pr = sess.get(url, timeout=10); pr.raise_for_status()
+            pr = sess.get(url, timeout=10)
+            pr.raise_for_status()
             ps = BeautifulSoup(pr.text, "html.parser")
-            h2 = ps.find("h2"); title = h2.get_text(strip=True) if h2 else ""
+            h2 = ps.find("h2")
+            title = h2.get_text(strip=True) if h2 else ""
             paras = ps.find_all("p", attrs={"data-block-key": True})
             txt = "\n".join(p.get_text(strip=True) for p in paras)
             compiled += f"{title}\n{txt}\n\n"
@@ -181,7 +186,8 @@ def fetch_nhs_info(query: str, min_len: int = 1500, max_results: int = 5) -> str
 def fetch_url_content(url: str) -> str:
     sess = make_uk_session()
     try:
-        r = sess.get(url, timeout=15); r.raise_for_status()
+        r = sess.get(url, timeout=15)
+        r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
         main = soup.find("article") or soup.find("main") or soup.body
         return main.get_text("\n", strip=True) if main else ""
@@ -302,7 +308,6 @@ if st.button("Analyze"):
 
             if input_type == "Medicine":
                 bnf = fetch_bnf_info(user_input)
-                # only accept detail or snippet—no generic subscription text
                 if bnf["full_text"].strip():
                     ref_text = bnf["full_text"]
                 elif bnf["card_snippets"]:
@@ -310,7 +315,7 @@ if st.button("Analyze"):
                 else:
                     st.error(f"❌ No medicine information found for “{user_input}” on BNF.")
                     status_ui.update(label="No BNF content.", state="error")
-                  continue
+                    continue
                 src = "BNF"
 
             elif input_type == "Medical Query":
@@ -319,7 +324,6 @@ if st.button("Analyze"):
 
             else:  # Webpage with Medical Claims
                 page_text = fetch_url_content(user_input)
-                # derive NHS query from page title if possible
                 title = ""
                 try:
                     html = requests.get(user_input, timeout=10).text
@@ -345,7 +349,7 @@ if st.session_state["done"]:
 
     if input_type in ["Medicine","Medical Query"]:
         sim = compute_similarity_score(
-            st.session_state["summary"],st.session_state["ref"]
+            st.session_state["summary"], st.session_state["ref"]
         )
         st.markdown(f"**Similarity Score:** {sim}/100")
 
