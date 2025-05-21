@@ -276,7 +276,7 @@ if st.button("Analyze"):
                 elif bnf["card_snippets"]:
                     ref = "\n\n".join(bnf["card_snippets"])
                 else:
-                    st.error(f"❌ No BNF info for “{user_input}”."); status_ui.error("No BNF content."); st.session_state.done=True; continue
+                    st.error(f"❌ No BNF info for “{user_input}”."); status_ui.error("No BNF content."); st.session_state.done=True; st.stop() 
                 src = "BNF"
 
             elif input_type == "Medical Query":
