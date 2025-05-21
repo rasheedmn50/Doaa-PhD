@@ -84,18 +84,19 @@ except Exception as e:
 import base64
 
 def make_uk_session():
-    # Pull the raw "username:password" from your secrets
-    proxy_url = st.secrets["PROXYMESH_URL"]          # e.g. 'proxy.proxymesh.com'
-    proxy_user = st.secrets["PROXYMESH_USER"]       # 'rasheed_nassr'
-    proxy_pass = st.secrets["PROXYMESH_PASSWORD"]   # 'cj8WFW7y@9UndNq'
-    creds_b64   = base64.b64encode(f"{proxy_user}:{proxy_pass}".encode()).decode()
+    host = st.secrets["PROXYMESH_HOST"]
+    port = st.secrets["PROXYMESH_PORT"]
+    user = st.secrets["PROXYMESH_USER"]
+    pw   = st.secrets["PROXYMESH_PASS"]
+
+    # Build Basic‐Auth header
+    creds_b64 = base64.b64encode(f"{user}:{pw}".encode()).decode()
 
     sess = requests.Session()
     sess.proxies.update({
-        "http":  f"http://{proxy_url}:31280",
-        "https": f"http://{proxy_url}:31280"
+        "http":  f"http://{host}:{port}",
+        "https": f"http://{host}:{port}",
     })
-    # Attach Basic-Auth in header rather than embedding in URL
     sess.headers.update({
         "Proxy-Authorization": f"Basic {creds_b64}",
         "User-Agent": (
@@ -105,6 +106,7 @@ def make_uk_session():
         "Accept-Language": "en-GB,en;q=0.9"
     })
     return sess
+
 
 # ─── BNF SCRAPER ──────────────────────────────────────────────────
 def fetch_bnf_info(med_name: str, max_links: int = 5):
