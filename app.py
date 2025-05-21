@@ -71,14 +71,22 @@ except Exception as e:
 
 # ─── INIT CLIENTS ─────────────────────────────────────────────────
 try:
-    client         = OpenAI(api_key=OPENAI_API_KEY)
-    model          = SentenceTransformer("all-MiniLM-L6-v2")
-    reddit         = praw.Reddit(
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    # force transformer onto CPU to avoid "meta" errors
+    try:
+        model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
+    except Exception as e:
+        logging.error(f"Could not load SentenceTransformer: {e}")
+        model = None
+        st.warning("⚠️ Similarity features disabled (model failed to load).")
+
+    reddit = praw.Reddit(
         client_id=REDDIT_CLIENT_ID,
         client_secret=REDDIT_CLIENT_SECRET,
         user_agent=REDDIT_USER_AGENT
     )
     twitter_client = tweepy.Client(bearer_token=TWITTER_BEARER_TOKEN)
+
 except Exception as e:
     st.error(f"🔴 API client init error: {e}")
     st.stop()
@@ -147,7 +155,8 @@ def fetch_nhs_info(query: str, min_len: int = 1500, max_results: int = 5) -> str
             url = href if href.startswith("http") else base + href
             pr = sess.get(url, timeout=10); pr.raise_for_status()
             ps = BeautifulSoup(pr.text, "html.parser")
-            title = ps.find("h2"); paras = ps.find_all("p", attrs={"data-block-key": True})
+            title = ps.find("h2")
+            paras = ps.find_all("p", attrs={"data-block-key": True})
             txt = "\n".join(p.get_text(strip=True) for p in paras)
             compiled += f"{title.get_text(strip=True) if title else ''}\n{txt}\n\n"
             if len(compiled) >= min_len: break
@@ -189,7 +198,8 @@ def generate_response(inp: str, ref: str) -> str:
 
 # ─── SIMILARITY SCORE ─────────────────────────────────────────────
 def compute_similarity_score(a: str, b: str) -> float:
-    if not a or not b: return 0.0
+    if not a or not b or model is None:
+        return 0.0
     try:
         ea = model.encode(a, convert_to_tensor=True)
         eb = model.encode(b, convert_to_tensor=True)
@@ -269,14 +279,17 @@ if st.button("Analyze"):
     else:
         with st.status(f"Fetching {input_type}…", expanded=True) as status_ui:
             ref, src = "", ""
+
             if input_type == "Medicine":
                 bnf = fetch_bnf_info(user_input)
-                if bnf["full_text"].strip():
-                    ref = bnf["full_text"]
-                elif bnf["card_snippets"]:
-                    ref = "\n\n".join(bnf["card_snippets"])
-                else:
-                    st.error(f"❌ No BNF info for “{user_input}”."); status_ui.error("No BNF content."); st.session_state.done=True; st.stop() 
+                # abort if no BNF info at all
+                if not bnf["full_text"].strip() and not bnf["card_snippets"]:
+                    st.error(f"❌ No BNF info for “{user_input}”.")
+                    status_ui.error("No BNF content.")
+                    st.session_state.done = True
+                    st.stop()
+
+                ref = bnf["full_text"] or "\n\n".join(bnf["card_snippets"])
                 src = "BNF"
 
             elif input_type == "Medical Query":
@@ -284,7 +297,7 @@ if st.button("Analyze"):
                 src = "NHS"
 
             else:  # Webpage with Medical Claims
-                # 1) raw page text
+                # 1) raw page
                 page_text = fetch_url_content(user_input)
                 # 2) summary
                 status_ui.update("Summarizing webpage…")
@@ -293,8 +306,7 @@ if st.button("Analyze"):
                     messages=[
                         {"role":"system","content":"You are a medical summarisation assistant."},
                         {"role":"user","content":(
-                            "Summarize the following page text in layman terms:\n\n" +
-                            page_text[:15000]
+                            "Summarize the following page text:\n\n" + page_text[:15000]
                         )}
                     ],
                     temperature=0.2, max_tokens=500
@@ -304,7 +316,6 @@ if st.button("Analyze"):
                 src = "Webpage"
 
             st.session_state.update(ref=ref, source=src)
-
             status_ui.update("Generating summary…")
             summ = generate_response(user_input, ref)
             st.session_state.update(summary=summ, done=True)
