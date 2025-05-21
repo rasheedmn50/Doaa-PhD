@@ -81,14 +81,23 @@ except Exception as e:
     st.stop()
 
 # ─── UK-ROUTED REQUESTS SESSION ────────────────────────────────────
+import base64
+
 def make_uk_session():
+    # Pull the raw "username:password" from your secrets
+    proxy_url = st.secrets["PROXYMESH_URL"]          # e.g. 'proxy.proxymesh.com'
+    proxy_user = st.secrets["PROXYMESH_USER"]       # 'rasheed_nassr'
+    proxy_pass = st.secrets["PROXYMESH_PASSWORD"]   # 'cj8WFW7y@9UndNq'
+    creds_b64   = base64.b64encode(f"{proxy_user}:{proxy_pass}".encode()).decode()
+
     sess = requests.Session()
-    if PROXYMESH_URL:
-        sess.proxies.update({
-            "http":  PROXYMESH_URL,
-            "https": PROXYMESH_URL
-        })
+    sess.proxies.update({
+        "http":  f"http://{proxy_url}:31280",
+        "https": f"http://{proxy_url}:31280"
+    })
+    # Attach Basic-Auth in header rather than embedding in URL
     sess.headers.update({
+        "Proxy-Authorization": f"Basic {creds_b64}",
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
