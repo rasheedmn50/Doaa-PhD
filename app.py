@@ -83,28 +83,22 @@ except Exception as e:
 # ─── UK-ROUTED REQUESTS SESSION ────────────────────────────────────
 
 import base64
-from urllib.parse import quote
-
-import requests
-from urllib.parse import quote
 
 def make_uk_session():
-    host = st.secrets["PROXYMESH_HOST"]    # now "uk.proxymesh.com"
-    port = st.secrets["PROXYMESH_PORT"]    # "31280"
+    host = st.secrets["PROXYMESH_HOST"]
+    port = st.secrets["PROXYMESH_PORT"]
     user = st.secrets["PROXYMESH_USER"]
     pw   = st.secrets["PROXYMESH_PASS"]
 
-    # URL-encode credentials in case of special chars
-    user_enc = quote(user, safe="")
-    pw_enc   = quote(pw,   safe="")
-    proxy_url = f"http://{user_enc}:{pw_enc}@{host}:{port}"
+    creds_b64 = base64.b64encode(f"{user}:{pw}".encode()).decode()
 
     sess = requests.Session()
     sess.proxies.update({
-        "http":  proxy_url,
-        "https": proxy_url,
+        "http":  f"http://{host}:{port}",
+        "https": f"http://{host}:{port}",
     })
     sess.headers.update({
+        "Proxy-Authorization": f"Basic {creds_b64}",
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
@@ -115,15 +109,11 @@ def make_uk_session():
 
 
 
-
 # ─── BNF SCRAPER ──────────────────────────────────────────────────
 def fetch_bnf_info(med_name: str, max_links: int = 5):
     base = "https://bnf.nice.org.uk"
     search_url = f"{base}/search/?q={quote(med_name)}"
-    
-    #sess = make_uk_session()
     sess = make_uk_session()
-    resp = sess.get(search_url, timeout=30)
     out = {"card_snippets": [], "links": [], "full_text": ""}
 
     try:
@@ -162,7 +152,7 @@ def fetch_nhs_info(query: str, min_len: int = 1500, max_results: int = 5) -> str
     sess       = make_uk_session()
     compiled   = ""
     try:
-        resp = sess.get(search_url, params={"q": query, "page": 0}, timeout=30)
+        resp = sess.get(search_url, params={"q": query, "page": 0}, timeout=10)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
         ul = soup.find("ul", class_="nhsuk-list")
