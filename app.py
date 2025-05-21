@@ -83,22 +83,25 @@ except Exception as e:
 # ─── UK-ROUTED REQUESTS SESSION ────────────────────────────────────
 
 import base64
+from urllib.parse import quote
 
 def make_uk_session():
-    host = st.secrets["PROXYMESH_HOST"]
-    port = st.secrets["PROXYMESH_PORT"]
-    user = st.secrets["PROXYMESH_USER"]
-    pw   = st.secrets["PROXYMESH_PASS"]
+    host = st.secrets["PROXYMESH_HOST"]    # "open.proxymesh.com"
+    port = st.secrets["PROXYMESH_PORT"]    # "31280"
+    user = st.secrets["PROXYMESH_USER"]    # "rasheed_nassr"
+    pw   = st.secrets["PROXYMESH_PASS"]    # "cj8WFW7y@9UndNq"
 
-    creds_b64 = base64.b64encode(f"{user}:{pw}".encode()).decode()
+    # URL‐encode any special chars
+    user_enc = quote(user, safe="")
+    pw_enc   = quote(pw,   safe="")
+    proxy_url = f"http://{user_enc}:{pw_enc}@{host}:{port}"
 
     sess = requests.Session()
     sess.proxies.update({
-        "http":  f"http://{host}:{port}",
-        "https": f"http://{host}:{port}",
+        "http":  proxy_url,
+        "https": proxy_url,
     })
     sess.headers.update({
-        "Proxy-Authorization": f"Basic {creds_b64}",
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
