@@ -72,21 +72,19 @@ except Exception as e:
 # ─── INIT CLIENTS ─────────────────────────────────────────────────
 try:
     client = OpenAI(api_key=OPENAI_API_KEY)
-    # force transformer onto CPU to avoid "meta" errors
+    # Force model onto CPU
     try:
         model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
     except Exception as e:
-        logging.error(f"Could not load SentenceTransformer: {e}")
+        logging.error(f"SentenceTransformer load error: {e}")
         model = None
-        st.warning("⚠️ Similarity features disabled (model failed to load).")
-
+        st.warning("⚠️ Similarity features disabled.")
     reddit = praw.Reddit(
         client_id=REDDIT_CLIENT_ID,
         client_secret=REDDIT_CLIENT_SECRET,
         user_agent=REDDIT_USER_AGENT
     )
     twitter_client = tweepy.Client(bearer_token=TWITTER_BEARER_TOKEN)
-
 except Exception as e:
     st.error(f"🔴 API client init error: {e}")
     st.stop()
@@ -111,7 +109,6 @@ def fetch_bnf_info(med_name: str, max_links: int = 5):
     search_url = f"{base}/search/?q={quote(med_name)}"
     sess = make_uk_session()
     out = {"card_snippets": [], "links": [], "full_text": ""}
-
     try:
         r = sess.get(search_url, timeout=10); r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
@@ -125,7 +122,6 @@ def fetch_bnf_info(med_name: str, max_links: int = 5):
             snippet = card.get_text(" ", strip=True)
             out["links"].append({"title": title, "url": url})
             out["card_snippets"].append(snippet)
-
         for link in out["links"]:
             time.sleep(0.5)
             p = sess.get(link["url"], timeout=10); p.raise_for_status()
@@ -133,10 +129,8 @@ def fetch_bnf_info(med_name: str, max_links: int = 5):
             topic = ps.find(id="topic") or ps.find("main") or ps.body
             text = topic.get_text("\n", strip=True) if topic else ps.get_text("\n", strip=True)
             out["full_text"] += f"## {link['title']}\n\n{text}\n\n"
-
     except Exception as e:
         logging.error(f"BNF fetch error: {e}")
-
     return out
 
 # ─── NHS SCRAPER ──────────────────────────────────────────────────
@@ -145,7 +139,6 @@ def fetch_nhs_info(query: str, min_len: int = 1500, max_results: int = 5) -> str
     search_url = f"{base}/search/results"
     sess = make_uk_session()
     compiled = ""
-
     try:
         resp = sess.get(search_url, params={"q": query}, timeout=10); resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
@@ -158,11 +151,10 @@ def fetch_nhs_info(query: str, min_len: int = 1500, max_results: int = 5) -> str
             title = ps.find("h2")
             paras = ps.find_all("p", attrs={"data-block-key": True})
             txt = "\n".join(p.get_text(strip=True) for p in paras)
-            compiled += f"{title.get_text(strip=True) if title else ''}\n{txt}\n\n"
+            compiled += f"{title.get_text(strip=True) if title else ''}\n\n{txt}\n\n"
             if len(compiled) >= min_len: break
     except Exception as e:
         logging.error(f"NHS fetch error: {e}")
-
     return compiled
 
 # ─── URL FETCH ────────────────────────────────────────────────────
@@ -177,7 +169,7 @@ def fetch_url_content(url: str) -> str:
         logging.error(f"URL fetch failed: {e}")
         return ""
 
-# ─── GPT-4 SUMMARY ────────────────────────────────────────────────
+# ─── GPT-4o SUMMARY ───────────────────────────────────────────────
 def generate_response(inp: str, ref: str) -> str:
     prompt = (
         "You are a medical assistant. Use *only* the reference below.\n\n"
@@ -205,15 +197,18 @@ def compute_similarity_score(a: str, b: str) -> float:
         eb = model.encode(b, convert_to_tensor=True)
         sim = util.cos_sim(ea, eb).item()
         return round(sim * 100, 2)
-    except Exception:
+    except Exception as e:
+        logging.error(f"Sim score error: {e}")
         return 0.0
 
 # ─── FACT-CHECK POSTS ──────────────────────────────────────────────
 def fact_check_post(post: str, ref: str) -> str:
     prompt = (
-        "Fact-check this post against the reference below.\n"
-        "✅ supported, ❌ contradicted, ⚠️ unverifiable.\n\n"
-        f"POST:\n\"\"\"{post}\"\"\"\n\nREFERENCE:\n\"\"\"{ref[:8000]}\"\"\"\n\nBegin."
+        "Fact-check this post against the reference below. "
+        "Use a Markdown bullet list with ✅/⚠️/❌.\n\n"
+        f"POST:\n\"\"\"{post}\"\"\"\n\n"
+        f"REFERENCE:\n\"\"\"{ref[:8000]}\"\"\"\n\n"
+        "Begin."
     )
     msgs = [
         {"role":"system","content":"Fact-check medical claims."},
@@ -263,9 +258,9 @@ input_type = st.radio(
 )
 
 placeholders = {
-    "Medicine": "e.g. Paracetamol",
-    "Medical Query": "e.g. symptoms of flu",
-    "Webpage with Medical Claims": "e.g. https://example.com/article"
+    "Medicine":                   "e.g. Paracetamol",
+    "Medical Query":              "e.g. symptoms of flu",
+    "Webpage with Medical Claims":"e.g. https://example.com/article"
 }
 user_input = st.text_input(f"Enter {input_type}:", placeholders[input_type])
 
@@ -296,19 +291,9 @@ if st.button("Analyze"):
                 src = "NHS"
 
             else:  # Webpage with Medical Claims
-                status_ui.update(label="Fetching & summarizing webpage…")
+                status_ui.update(label="Fetching webpage…")
                 page_text = fetch_url_content(user_input)
-                summ_r = client.chat.completions.create(
-                    model="gpt-4o",
-                    messages=[
-                        {"role":"system","content":"You are a medical summarisation assistant."},
-                        {"role":"user","content":(
-                            "Summarize the following page text:\n\n" + page_text[:15000]
-                        )}
-                    ],
-                    temperature=0.2, max_tokens=500
-                )
-                ref = summ_r.choices[0].message.content
+                ref = page_text  # we'll use AI to summarize next
                 src = "Webpage"
 
             st.session_state.update(ref=ref, source=src)
@@ -321,34 +306,41 @@ if st.session_state.done:
     st.markdown(f"### 🤖 Summary ({st.session_state.source})")
     st.write(st.session_state.summary)
 
-    if input_type in ["Medicine","Medical Query"]:
+    # — Medical Query: similarity + Reddit fact-check
+    if input_type == "Medical Query":
         sim = compute_similarity_score(
             st.session_state.summary, st.session_state.ref
         )
         st.markdown(f"**Similarity Score:** {sim}/100")
 
-    if input_type == "Webpage with Medical Claims":
-        st.markdown("### 📄 Webpage Summary")
-        st.write(st.session_state.ref)
+        st.markdown("## 🔎 Fact-Check Recent Reddit Posts")
+        posts = list(reddit.subreddit("medicine")
+                         .search(user_input, limit=5, sort="new"))
+        if not posts:
+            st.info("No Reddit posts found.")
+        else:
+            for i, post in enumerate(posts, 1):
+                txt = post.title + "\n\n" + post.selftext
+                st.markdown(f"**Post {i}:** {post.title}")
+                st.write(post.selftext or "*No body text*")
+                with st.spinner(f"Fact-checking post {i}…"):
+                    fc = fact_check_post(txt, st.session_state.ref)
+                st.markdown(fc)  # Markdown list from AI
+                st.markdown("---")
 
-        st.markdown("### ✅⚠️❌ Claims Verification", unsafe_allow_html=True)
+    # — Medicine (similarity only)
+    if input_type == "Medicine":
+        sim = compute_similarity_score(
+            st.session_state.summary, st.session_state.ref
+        )
+        st.markdown(f"**Similarity Score:** {sim}/100")
+
+    # — Webpage: Claims verification only
+    if input_type == "Webpage with Medical Claims":
+        st.markdown("## ✅⚠️❌ Claims Verification")
         with st.spinner("Verifying claims…"):
-            verify_r = client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role":"system","content":"You are a medical fact-checking assistant."},
-                    {"role":"user","content":(
-                        "Below is a webpage summary and its raw text. "
-                        "For each medical claim, output an HTML paragraph "
-                        "with a green span for ✅ verified, orange span for ⚠️ unverified, "
-                        "red span for ❌ contradicted.\n\n"
-                        f"SUMMARY:\n{st.session_state.ref}\n\n"
-                        f"RAW:\n{fetch_url_content(user_input)[:15000]}"
-                    )}
-                ],
-                temperature=0.0, max_tokens=800
-            )
-        st.markdown(verify_r.choices[0].message.content, unsafe_allow_html=True)
+            fc = fact_check_post(st.session_state.summary, st.session_state.ref)
+        st.markdown(fc)  # Markdown list
 
     st.markdown("---")
     with st.expander("📝 Doctor Feedback (optional)"):
