@@ -47,15 +47,16 @@ def footer():
 
 # ─── LOAD SECRETS ─────────────────────────────────────────────────
 try:
-    OPENAI_API_KEY            = st.secrets["OPENAI_API_KEY"]
-    REDDIT_CLIENT_ID          = st.secrets["REDDIT_CLIENT_ID"]
-    REDDIT_CLIENT_SECRET      = st.secrets["REDDIT_CLIENT_SECRET"]
-    REDDIT_USER_AGENT         = st.secrets["REDDIT_USER_AGENT"]
-    TWITTER_BEARER_TOKEN      = st.secrets["TWITTER_BEARER_TOKEN"]
-    GOOGLE_SHEETS_CREDENTIALS = st.secrets["GOOGLE_SHEETS_CREDENTIALS"]
-    GOOGLE_SHEET_NAME         = st.secrets["GOOGLE_SHEET_NAME"]
-    UK_PROXY                  = st.secrets.get("UK_PROXY", None)
+    OPENAI_API_KEY           = st.secrets["OPENAI_API_KEY"]
+    REDDIT_CLIENT_ID         = st.secrets["REDDIT_CLIENT_ID"]
+    REDDIT_CLIENT_SECRET     = st.secrets["REDDIT_CLIENT_SECRET"]
+    REDDIT_USER_AGENT        = st.secrets["REDDIT_USER_AGENT"]
+    TWITTER_BEARER_TOKEN     = st.secrets["TWITTER_BEARER_TOKEN"]
+    GOOGLE_SHEETS_CREDENTIALS= st.secrets["GOOGLE_SHEETS_CREDENTIALS"]
+    GOOGLE_SHEET_NAME        = st.secrets["GOOGLE_SHEET_NAME"]
+    PROXYMESH_URL            = st.secrets.get("PROXYMESH_URL", None)
 
+    # Parse Google credentials
     gcred = json.loads(GOOGLE_SHEETS_CREDENTIALS)
     scopes = ['https://spreadsheets.google.com/feeds','https://www.googleapis.com/auth/drive']
     creds = Credentials.from_service_account_info(gcred, scopes=scopes)
@@ -71,15 +72,9 @@ except Exception as e:
 
 # ─── INIT CLIENTS ─────────────────────────────────────────────────
 try:
-    client = OpenAI(api_key=OPENAI_API_KEY)
-    # Force model onto CPU
-    try:
-        model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
-    except Exception as e:
-        logging.error(f"SentenceTransformer load error: {e}")
-        model = None
-        st.warning("⚠️ Similarity features disabled.")
-    reddit = praw.Reddit(
+    client         = OpenAI(api_key=OPENAI_API_KEY)
+    model          = SentenceTransformer("all-MiniLM-L6-v2")
+    reddit         = praw.Reddit(
         client_id=REDDIT_CLIENT_ID,
         client_secret=REDDIT_CLIENT_SECRET,
         user_agent=REDDIT_USER_AGENT
@@ -91,17 +86,21 @@ except Exception as e:
 
 # ─── UK-ROUTED REQUESTS SESSION ────────────────────────────────────
 def make_uk_session():
-    s = requests.Session()
-    if UK_PROXY:
-        s.proxies.update({"http": UK_PROXY, "https": UK_PROXY})
-    s.headers.update({
+    sess = requests.Session()
+    # Route via ProxyMesh if provided
+    if PROXYMESH_URL:
+        sess.proxies.update({
+            "http":  PROXYMESH_URL,
+            "https": PROXYMESH_URL
+        })
+    sess.headers.update({
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
         ),
         "Accept-Language": "en-GB,en;q=0.9"
     })
-    return s
+    return sess
 
 # ─── BNF SCRAPER ──────────────────────────────────────────────────
 def fetch_bnf_info(med_name: str, max_links: int = 5):
@@ -109,59 +108,82 @@ def fetch_bnf_info(med_name: str, max_links: int = 5):
     search_url = f"{base}/search/?q={quote(med_name)}"
     sess = make_uk_session()
     out = {"card_snippets": [], "links": [], "full_text": ""}
+
     try:
-        r = sess.get(search_url, timeout=10); r.raise_for_status()
+        r = sess.get(search_url, timeout=10)
+        r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
+
+        # Pull up to `max_links` card snippets
         cards = soup.select("div[data-component='card']")[:max_links]
         for card in cards:
             a = card.find("a", href=True)
-            if not a: continue
-            href = a["href"]
-            url  = href if href.startswith("http") else base + href
+            if not a:
+                continue
+            href  = a["href"]
             title = a.get_text(strip=True)
-            snippet = card.get_text(" ", strip=True)
+            url   = href if href.startswith("http") else base + href
             out["links"].append({"title": title, "url": url})
+            snippet = card.get_text(" ", strip=True)
             out["card_snippets"].append(snippet)
+
+        # Fetch each detail page
         for link in out["links"]:
             time.sleep(0.5)
-            p = sess.get(link["url"], timeout=10); p.raise_for_status()
+            p = sess.get(link["url"], timeout=10)
+            p.raise_for_status()
             ps = BeautifulSoup(p.text, "html.parser")
             topic = ps.find(id="topic") or ps.find("main") or ps.body
-            text = topic.get_text("\n", strip=True) if topic else ps.get_text("\n", strip=True)
+            text  = topic.get_text("\n", strip=True) if topic else ps.get_text("\n", strip=True)
             out["full_text"] += f"## {link['title']}\n\n{text}\n\n"
+
     except Exception as e:
-        logging.error(f"BNF fetch error: {e}")
+        logging.error(f"BNF fetch via proxy failed: {e}")
+
     return out
 
 # ─── NHS SCRAPER ──────────────────────────────────────────────────
 def fetch_nhs_info(query: str, min_len: int = 1500, max_results: int = 5) -> str:
-    base = "https://www.nhs.uk"
+    base       = "https://www.nhs.uk"
     search_url = f"{base}/search/results"
-    sess = make_uk_session()
-    compiled = ""
+    sess       = make_uk_session()
+    compiled   = ""
     try:
-        resp = sess.get(search_url, params={"q": query}, timeout=10); resp.raise_for_status()
+        resp = sess.get(search_url, params={"q": query, "page": 0}, timeout=10)
+        resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
         results_ul = soup.find("ul", class_="nhsuk-list")
-        links = [a["href"] for a in results_ul.find_all("a", href=True)[:max_results]] if results_ul else []
-        for href in links:
-            url = href if href.startswith("http") else base + href
-            pr = sess.get(url, timeout=10); pr.raise_for_status()
+        links = []
+        if results_ul:
+            for a in results_ul.find_all("a", href=True)[:max_results]:
+                href = a["href"]
+                full = href if href.startswith("http") else base + href
+                links.append(full)
+
+        for url in links:
+            time.sleep(0.5)
+            pr = sess.get(url, timeout=10)
+            pr.raise_for_status()
             ps = BeautifulSoup(pr.text, "html.parser")
-            title = ps.find("h2")
-            paras = ps.find_all("p", attrs={"data-block-key": True})
-            txt = "\n".join(p.get_text(strip=True) for p in paras)
-            compiled += f"{title.get_text(strip=True) if title else ''}\n\n{txt}\n\n"
-            if len(compiled) >= min_len: break
+            h2   = ps.find("h2")
+            title= h2.get_text(strip=True) if h2 else ""
+            paras= ps.find_all("p", attrs={"data-block-key": True})
+            txt  = "\n".join(p.get_text(strip=True) for p in paras)
+            compiled += f"{title}\n{txt}\n\n"
+            if len(compiled) >= min_len:
+                break
+
     except Exception as e:
-        logging.error(f"NHS fetch error: {e}")
+        logging.warning(f"NHS fetch failed: {e}")
+
     return compiled
 
 # ─── URL FETCH ────────────────────────────────────────────────────
 def fetch_url_content(url: str) -> str:
     sess = make_uk_session()
     try:
-        r = sess.get(url, timeout=15); r.raise_for_status()
+        r = sess.get(url, timeout=15)
+        r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
         main = soup.find("article") or soup.find("main") or soup.body
         return main.get_text("\n", strip=True) if main else ""
@@ -176,8 +198,8 @@ def generate_response(inp: str, ref: str) -> str:
         f"User query: {inp}\n\nReference:\n{ref[:12000]}"
     )
     msgs = [
-        {"role":"system","content":"Answer strictly from the reference."},
-        {"role":"user",  "content":prompt}
+        {"role": "system", "content": "Answer strictly from the reference."},
+        {"role": "user",   "content": prompt}
     ]
     try:
         r = client.chat.completions.create(
@@ -190,29 +212,26 @@ def generate_response(inp: str, ref: str) -> str:
 
 # ─── SIMILARITY SCORE ─────────────────────────────────────────────
 def compute_similarity_score(a: str, b: str) -> float:
-    if not a or not b or model is None:
+    if not a or not b:
         return 0.0
     try:
         ea = model.encode(a, convert_to_tensor=True)
         eb = model.encode(b, convert_to_tensor=True)
-        sim = util.cos_sim(ea, eb).item()
+        sim= util.cos_sim(ea, eb).item()
         return round(sim * 100, 2)
-    except Exception as e:
-        logging.error(f"Sim score error: {e}")
+    except Exception:
         return 0.0
 
 # ─── FACT-CHECK POSTS ──────────────────────────────────────────────
 def fact_check_post(post: str, ref: str) -> str:
     prompt = (
-        "Fact-check this post against the reference below. "
-        "Use a Markdown bullet list with ✅/⚠️/❌.\n\n"
-        f"POST:\n\"\"\"{post}\"\"\"\n\n"
-        f"REFERENCE:\n\"\"\"{ref[:8000]}\"\"\"\n\n"
-        "Begin."
+        "Fact-check this post against the reference below.\n"
+        "✅ supported, ❌ contradicted, ⚠️ unverifiable.\n\n"
+        f"POST:\n\"\"\"{post}\"\"\"\n\nREFERENCE:\n\"\"\"{ref[:8000]}\"\"\"\n\nBegin."
     )
     msgs = [
-        {"role":"system","content":"Fact-check medical claims."},
-        {"role":"user",  "content":prompt}
+        {"role": "system", "content": "Fact-check medical claims."},
+        {"role": "user",   "content": prompt}
     ]
     try:
         r = client.chat.completions.create(
@@ -246,7 +265,9 @@ st.sidebar.image(
     "https://www.bcu.ac.uk/images/default-source/marketing/logos/bcu-logo.svg", width=150
 )
 st.sidebar.title("🧠 Medicine Info Validator")
-st.sidebar.warning("Disclaimer: For general understanding only; not medical advice.")
+st.sidebar.warning(
+    "Disclaimer: For general understanding only; not medical advice."
+)
 st.sidebar.caption("Developed by Doaa Al-Turkey")
 st.sidebar.markdown("---")
 
@@ -258,92 +279,83 @@ input_type = st.radio(
 )
 
 placeholders = {
-    "Medicine":                   "e.g. Paracetamol",
-    "Medical Query":              "e.g. symptoms of flu",
-    "Webpage with Medical Claims":"e.g. https://example.com/article"
+    "Medicine": "e.g. Paracetamol",
+    "Medical Query": "e.g. symptoms of flu",
+    "Webpage with Medical Claims": "e.g. https://example.com/article"
 }
 user_input = st.text_input(f"Enter {input_type}:", placeholders[input_type])
 
 if 'done' not in st.session_state:
-    st.session_state.update({"done":False,"ref":"","summary":"","source":""})
+    st.session_state.update({
+        "done": False,
+        "ref": "",
+        "summary": "",
+        "source": ""
+    })
 
 if st.button("Analyze"):
     st.session_state.update({"done":False,"ref":"","summary":"","source":""})
     if not user_input.strip():
         st.warning("Please enter valid input.")
     else:
-        with st.status(label=f"Fetching {input_type}…", expanded=True) as status_ui:
-            ref, src = "", ""
-
+        with st.status(f"Fetching {input_type}…", expanded=True) as status_ui:
+            ref_text, src = "", ""
             if input_type == "Medicine":
                 bnf = fetch_bnf_info(user_input)
-                if not bnf["full_text"].strip() and not bnf["card_snippets"]:
+                # prefer full_text → snippets
+                if bnf["full_text"].strip():
+                    ref_text = bnf["full_text"]
+                elif bnf["card_snippets"]:
+                    ref_text = "\n\n".join(bnf["card_snippets"])
+                else:
                     st.error(f"❌ No BNF info for “{user_input}”.")
-                    status_ui.update(label="No BNF content.", state="error")
+                    status_ui.error("No BNF content.")
                     st.session_state.done = True
-                    st.stop()
-                ref = bnf["full_text"] or "\n\n".join(bnf["card_snippets"])
+                    return
                 src = "BNF"
 
             elif input_type == "Medical Query":
-                status_ui.update(label="Fetching NHS data…")
-                ref = fetch_nhs_info(user_input)
+                ref_text = fetch_nhs_info(user_input)
                 src = "NHS"
 
             else:  # Webpage with Medical Claims
-                status_ui.update(label="Fetching webpage…")
-                page_text = fetch_url_content(user_input)
-                ref = page_text  # we'll use AI to summarize next
+                ref_text = fetch_url_content(user_input)
                 src = "Webpage"
 
-            st.session_state.update(ref=ref, source=src)
-            status_ui.update(label="Generating AI summary…")
-            summ = generate_response(user_input, ref)
-            st.session_state.update(summary=summ, done=True)
+            st.session_state["ref"]    = ref_text
+            st.session_state["source"] = src
+
+            status_ui.update(label="Generating summary…", state="running")
+            summ = generate_response(user_input, ref_text)
+            st.session_state["summary"] = summ
+            st.session_state["done"]    = True
             status_ui.update(label="Complete!", state="complete")
 
-if st.session_state.done:
-    st.markdown(f"### 🤖 Summary ({st.session_state.source})")
-    st.write(st.session_state.summary)
+if st.session_state["done"]:
+    # Summary block
+    st.markdown(f"### 🤖 Summary (based on {st.session_state['source']})")
+    st.write(st.session_state["summary"])
 
-    # — Medical Query: similarity + Reddit fact-check
-    if input_type == "Medical Query":
+    # Similarity score
+    if input_type in ["Medicine","Medical Query"]:
         sim = compute_similarity_score(
-            st.session_state.summary, st.session_state.ref
+            st.session_state["summary"], st.session_state["ref"]
         )
         st.markdown(f"**Similarity Score:** {sim}/100")
 
-        st.markdown("## 🔎 Fact-Check Recent Reddit Posts")
-        posts = list(reddit.subreddit("medicine")
-                         .search(user_input, limit=5, sort="new"))
-        if not posts:
-            st.info("No Reddit posts found.")
-        else:
-            for i, post in enumerate(posts, 1):
-                txt = post.title + "\n\n" + post.selftext
-                st.markdown(f"**Post {i}:** {post.title}")
-                st.write(post.selftext or "*No body text*")
-                with st.spinner(f"Fact-checking post {i}…"):
-                    fc = fact_check_post(txt, st.session_state.ref)
-                st.markdown(fc)  # Markdown list from AI
-                st.markdown("---")
-
-    # — Medicine (similarity only)
-    if input_type == "Medicine":
-        sim = compute_similarity_score(
-            st.session_state.summary, st.session_state.ref
-        )
-        st.markdown(f"**Similarity Score:** {sim}/100")
-
-    # — Webpage: Claims verification only
+    # Claims verification for Webpage only
     if input_type == "Webpage with Medical Claims":
-        st.markdown("## ✅⚠️❌ Claims Verification")
-        with st.spinner("Verifying claims…"):
-            fc = fact_check_post(st.session_state.summary, st.session_state.ref)
-        st.markdown(fc)  # Markdown list
+        st.markdown("### 🔎 Claims Verification")
+        with st.spinner("Fact-checking…"):
+            result = fact_check_post(
+                st.session_state["summary"],  # or user_input if you prefer
+                st.session_state["ref"]
+            )
+        st.write(result)
 
+    # Feedback
     st.markdown("---")
-    with st.expander("📝 Doctor Feedback (optional)"):
+    with st.expander("📝 Doctor Feedback (optional)", expanded=False):
         fb = st.text_area("Your feedback:")
         if st.button("Submit Feedback"):
             if fb.strip():
@@ -351,8 +363,8 @@ if st.session_state.done:
                     "Timestamp": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "Input": user_input,
                     "Type": input_type,
-                    "Source": st.session_state.source,
-                    "Summary": st.session_state.summary,
+                    "Source": st.session_state["source"],
+                    "Summary": st.session_state["summary"],
                     "Feedback": fb
                 }
                 if input_type in ["Medicine","Medical Query"]:
