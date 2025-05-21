@@ -81,6 +81,7 @@ except Exception as e:
     st.stop()
 
 # ─── UK-ROUTED REQUESTS SESSION ────────────────────────────────────
+
 import base64
 
 def make_uk_session():
@@ -89,7 +90,6 @@ def make_uk_session():
     user = st.secrets["PROXYMESH_USER"]
     pw   = st.secrets["PROXYMESH_PASS"]
 
-    # Build Basic‐Auth header
     creds_b64 = base64.b64encode(f"{user}:{pw}".encode()).decode()
 
     sess = requests.Session()
@@ -106,6 +106,7 @@ def make_uk_session():
         "Accept-Language": "en-GB,en;q=0.9"
     })
     return sess
+
 
 
 # ─── BNF SCRAPER ──────────────────────────────────────────────────
