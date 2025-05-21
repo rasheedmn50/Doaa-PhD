@@ -120,9 +120,10 @@ def make_uk_session():
 def fetch_bnf_info(med_name: str, max_links: int = 5):
     base = "https://bnf.nice.org.uk"
     search_url = f"{base}/search/?q={quote(med_name)}"
+    
     #sess = make_uk_session()
     sess = make_uk_session()
-    resp = sess.get("https://bnf.nice.org.uk/search/?q=Metformin", timeout=30)
+    resp = sess.get(search_url, timeout=30)
     out = {"card_snippets": [], "links": [], "full_text": ""}
 
     try:
