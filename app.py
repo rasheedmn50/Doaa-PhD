@@ -114,7 +114,7 @@ def fetch_bnf_info(med_name: str, max_links: int = 5):
     out = {"card_snippets": [], "links": [], "full_text": ""}
 
     try:
-        r = sess.get(search_url, timeout=10)
+        r = sess.get(search_url, timeout=30)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
 
